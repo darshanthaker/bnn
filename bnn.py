@@ -41,8 +41,8 @@ class NeuralNetwork(nn.Module):
         self.network = nn.Sequential( \
                 nn.Linear(input_size, 5), \
                 nn.ReLU(), \
-                nn.Linear(5, 5), \
-                nn.ReLU(), \
+                #nn.Linear(5, 5), \
+                #nn.ReLU(), \
                 nn.Linear(5, 1))
 
     def forward(self, x):
@@ -71,19 +71,24 @@ class BayesianNeuralNetwork(object):
         for name, param in det_model.named_parameters():
             # TODO(dbthaker): Better initialization of V.P.?
             mu = torch.zeros(param.shape)
-            sigma = self.weight_var * torch.ones(param.shape)
+            sigma = 10 * torch.ones(param.shape)
             mu_param = pyro.param("guide_{}_mu".format(name), mu)
             sigma_param = self.softplus(pyro.param("guide_{}_sigma".format(name), sigma))
             prior_dict[name] = dists.Normal(mu_param, sigma_param)
         return prior_dict
             
+    # P(x|z)P(z)
     def model(self, X, y):
         N = X.shape[0]
         priors = self.set_up_model_priors(self.neural_net)
         lifted_module = pyro.random_module("module", self.neural_net, priors)
         lifted_reg_model = lifted_module()
 
-        
+        # TODO(dbthaker): Introduce noise variables z.
+        # TODO(dbthaker): Batchify this.
+        prediction = lifted_reg_model(X).squeeze(-1)
+        noise = pyro.sample("noise", dists.Normal(0, 1))
+        return prediction + noise
 
         # Sample latent variable z here?
         #z = pyro.sample("disturbance", dists.Normal(0, self.z_var))
@@ -91,7 +96,6 @@ class BayesianNeuralNetwork(object):
         #with pyro.iarange("map", N, subsample=data):
         #with pyro.iarange("map", N, subsample_size=250) as ind:
         #with pyro.iarange("map", N, subsample=X):
-        # run the regressor forward conditioned on inputs
         #batch_X = X.index_select(0, ind)
         #batch_X = X
         #batch_y = y
@@ -100,9 +104,13 @@ class BayesianNeuralNetwork(object):
         #return prediction
         #return prediction + pyro.sample("noise", dists.Normal(0, 1))
 
+    # q_v(z|x) where v are variational parameters.
     def guide(self, X, y):
-        dists = self.set_up_variational_parameters(self.neural_net)
-        lifted_module = pyro.random_module("module", self.neural_net, dists)
+        # TODO(dbthaker): How can we use z here?
+        dist = self.set_up_variational_parameters(self.neural_net)
+        # Instead of returning lifted_module(), just sample it
+        # and then also sample the z's? Should we also sample noise?
+        lifted_module = pyro.random_module("module", self.neural_net, dist)
         return lifted_module()
 
     def run_inference(self, X, y):
@@ -128,8 +136,8 @@ class BayesianNeuralNetwork(object):
         for i in range(num_nns):
             sampled_model = self.guide(None, None)
             y = sampled_model(X).squeeze(-1).detach().numpy()
-            plt.scatter(X, y, s=0.1)
-            plt.show()
+            #plt.scatter(X, y, s=0.1)
+            #plt.show()
             pred_ys.append(y)
         tiled_xs = np.tile(X[:, 0], num_nns)
         tiled_ys = np.concatenate(pred_ys)
