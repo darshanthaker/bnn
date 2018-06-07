@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import pyro
 import pyro.distributions as dists
 from pyro.distributions import Normal
-from pyro.infer import SVI, Trace_ELBO
+from pyro.infer import SVI, Trace_ELBO, TraceGraph_ELBO
 from pyro.optim import Adam
 from pdb import set_trace
 
@@ -18,10 +18,11 @@ from pdb import set_trace
 def build_toy_dataset2(N, plot_data=False):
     X = np.random.uniform(low=-4, high=4, size=N)
     sorted_X = np.sort(X)
+    sin_scale = 7
     noise = np.random.normal(size=N) # Unit Gaussian noise.
     #y = 7 * np.sin(X) + 3 * np.multiply(np.abs(np.cos(X / 2)), noise)
-    y = 7 * np.sin(X) + noise # Homoskedastic noise vs. heteroskedastic noise for now.
-    ground_truth_fn = lambda x: 7 * np.sin(x)
+    y = sin_scale * np.sin(X) + noise # Homoskedastic noise vs. heteroskedastic noise for now.
+    ground_truth_fn = lambda x: sin_scale * np.sin(x)
     ground_truth = ground_truth_fn(sorted_X)
     X = np.reshape(X, (N, 1))
     y = np.reshape(y, (N, 1))
@@ -93,71 +94,76 @@ class BayesianNeuralNetwork(object):
 
 
     def __init__(self, p):
-        input_size = p # Additional feature for stochastic disturbance.
+        input_size = p + 1 # Additional feature for stochastic disturbance.
         self.neural_net = NeuralNetwork(input_size)
         self.softplus = nn.Softplus()
-        self.weight_var = 10
+        self.weight_var = 20
         self.z_var = p
 
-    def set_up_model_priors(self, det_model):
+    def set_up_model_priors(self, det_model, N):
         prior_dict = dict()
         for name, param in det_model.named_parameters():
             mu = torch.zeros(param.shape)
             sigma = self.weight_var * torch.ones(param.shape)
-            prior_dict[name] = dists.Normal(mu, sigma).independent(1)
-        return prior_dict
+            prior_dict[name] = dists.Normal(mu, sigma)
+        # TODO(dbthaker): This should be batchified eventually!
+        z = torch.zeros((N, 1))
+        for i in range(N):
+            z_i = pyro.sample("z_{}".format(i), dists.Normal(0, self.z_var))
+            z[i, :] = z_i
+        return prior_dict, z
 
-    def set_up_variational_parameters(self, det_model):
+    def set_up_variational_parameters(self, det_model, N):
         prior_dict = dict()
+        z_prior_lst = list()
         for name, param in det_model.named_parameters():
             mu = 0.1 * torch.randn(param.shape)
-            log_sigma = -3 * torch.ones(param.shape) + 0.05 * torch.randn(param.shape)
+            log_sigma = -0.9 * torch.ones(param.shape) + 0.05 * torch.randn(param.shape)
             mu_param = pyro.param("guide_{}_mu".format(name), mu)
             sigma_param = self.softplus(pyro.param("guide_{}_logsigma".format(name), \
                                                    log_sigma))
-            prior_dict[name] = dists.Normal(mu_param, sigma_param).independent(1)
-        return prior_dict
+            prior_dict[name] = dists.Normal(mu_param, sigma_param)
+        # TODO(dbthaker): This should be batchified eventually!
+        for i in range(N): 
+            mu = torch.zeros(1)
+            log_sigma = self.z_var * torch.ones(1)
+            # TODO(dbthaker): Uncomment this when q(z) needs to be learned as well!
+            #                 and change above to be V.P. initialization and not prior.
+            #mu_param = pyro.param("guide_z{}_mu".format(i), mu)
+            #sigma_param = self.softplus(pyro.param("guide_z{}_logsigma".format(i), \
+            #                                       log_sigma))
+            #z_prior_lst.append(dists.Normal(mu_param, sigma_param))
+            z_prior_lst.append(dists.Normal(mu, log_sigma))
+        return prior_dict, z_prior_lst
             
     # P(x|z)P(z)
     def model(self, X, y):
         N = X.shape[0]
-        priors = self.set_up_model_priors(self.neural_net)
+        priors, z = self.set_up_model_priors(self.neural_net, N)
         lifted_module = pyro.random_module("module", self.neural_net, priors)
         lifted_reg_model = lifted_module()
 
-        # TODO(dbthaker): Introduce noise variables z.
         # TODO(dbthaker): Batchify this.
         #noise = pyro.sample("noise", dists.Normal(0, 1))
+        disturbed_X = torch.cat([X, z], dim=1)
+        # Below line assumes independence across N datapoints.
         with pyro.iarange("map", N):
-            prediction = lifted_reg_model(X).squeeze(-1)
-            pyro.sample("obs", Normal(prediction, torch.ones(N)), obs=y)
-
-        # Sample latent variable z here?
-        #z = pyro.sample("disturbance", dists.Normal(0, self.z_var))
-        #set_trace()
-        #with pyro.iarange("map", N, subsample=data):
-        #with pyro.iarange("map", N, subsample_size=250) as ind:
-        #with pyro.iarange("map", N, subsample=X):
-        #batch_X = X.index_select(0, ind)
-        #batch_X = X
-        #batch_y = y
-        #batch_y = y.index_select(0, ind)
-        #prediction = lifted_reg_model(batch_X).squeeze(-1)
-        #return prediction
-        #return prediction + pyro.sample("noise", dists.Normal(0, 1))
+            prediction = lifted_reg_model(disturbed_X).squeeze(-1)
+            pyro.sample("obs", dists.Normal(prediction, torch.ones(N)).independent(1), \
+                 obs=y)
 
     # q_v(z|x) where v are variational parameters.
     def guide(self, X, y):
-        # TODO(dbthaker): How can we use z here?
-        dist = self.set_up_variational_parameters(self.neural_net)
-        # Instead of returning lifted_module(), just sample it
-        # and then also sample the z's? Should we also sample noise?
+        N = X.shape[0] 
+
+        # TODO(dbthaker): Deal with eps additive Gaussian noise?
+        dist, z_lst = self.set_up_variational_parameters(self.neural_net, N)
         lifted_module = pyro.random_module("module", self.neural_net, dist)
         sampled_model = lifted_module()
-        #sigma = -10 * torch.ones(1)
-        #noise_sigma = self.softplus(pyro.param("guide_noise_sigma", sigma))
-        #pyro.sample("noise", dists.Normal(0, noise_sigma))
-        return sampled_model
+        sampled_z = np.zeros(N)
+        for i in pyro.irange("z_loop", len(z_lst)):
+            sampled_z[i] = pyro.sample("z_{}".format(i), z_lst[i])
+        return sampled_model, torch.from_numpy(sampled_z)
 
     def run_inference(self, X, y):
         N = X.shape[0]
@@ -165,8 +171,9 @@ class BayesianNeuralNetwork(object):
         pyro.clear_param_store()
         optim = Adam({"lr": 0.002})
         svi = SVI(self.model, self.guide, optim, loss=Trace_ELBO())
-        for j in range(10000):
+        for j in range(1000):
             epoch_loss = svi.step(X, y)
+            #set_trace()
             if j % 100 == 0:
                 print("[{}] Loss: {}".format(j, epoch_loss / float(N)))
         for name in pyro.get_param_store().get_all_param_names():
@@ -181,8 +188,10 @@ class BayesianNeuralNetwork(object):
         num_nns = 100
         pred_ys = list()
         for i in range(num_nns):
-            sampled_model = self.guide(None, None)
-            y = sampled_model(X).squeeze(-1).detach().numpy()
+            sampled_model, z = self.guide(X, None)
+            z = z.view(num_points, 1).type(torch.Tensor)
+            disturbed_X = torch.cat([X, z], dim=1).type(torch.Tensor)
+            y = sampled_model(disturbed_X).squeeze(-1).detach().numpy()
             #plt.scatter(X, y, s=0.1)
             #plt.show()
             pred_ys.append(y)
