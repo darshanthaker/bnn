@@ -104,7 +104,7 @@ class BayesianNeuralNetwork(object):
         prior_dict = dict()
         for name, param in det_model.named_parameters():
             mu = torch.zeros(param.shape)
-            sigma = self.weight_var * torch.ones(param.shape)
+            sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
             prior_dict[name] = dists.Normal(mu, sigma)
         # TODO(dbthaker): This should be batchified eventually!
         z = torch.zeros((N, 1))
@@ -160,6 +160,7 @@ class BayesianNeuralNetwork(object):
         dist, z_lst = self.set_up_variational_parameters(self.neural_net, N)
         lifted_module = pyro.random_module("module", self.neural_net, dist)
         sampled_model = lifted_module()
+        set_trace()
         sampled_z = np.zeros(N)
         for i in pyro.irange("z_loop", len(z_lst)):
             sampled_z[i] = pyro.sample("z_{}".format(i), z_lst[i])
