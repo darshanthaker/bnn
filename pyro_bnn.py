@@ -10,6 +10,11 @@ from pyro.infer import SVI, Trace_ELBO, TraceGraph_ELBO
 from pyro.optim import Adam
 from pdb import set_trace
 
+"""
+NOTE: This is incomplete and BNN inference does not yield good results,
+      presumably due to some bug. Refer to bnn.py for a working version.
+"""
+
 # Plot 2 from [Depeweg et al. 2017] Figure 5.
 # Ground truth function: y = 7sin(x)
 # Noisy estimate (heteroskedastic noise): y = 7sin(x) + 3|cos(x/2)|*noise
