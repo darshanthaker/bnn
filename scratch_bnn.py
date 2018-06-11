@@ -78,10 +78,10 @@ class AlphaDivergenceLoss(nn.Module):
             sampled_values.append(v.rsample())
         return torch.from_numpy(np.array(sampled_values))
 
-    def sample_bnn_weights(self, weight_dists):
+    def sample_batches(self, weight_dists, num_rows):
         P = len(weight_dists)
-        out = torch.zeros((self.K, P))
-        for i in range(self.K):
+        out = torch.zeros((num_rows, P))
+        for i in range(num_rows):
             sample = self.sample_from_dists(weight_dists)
             out[i, :] = sample
         return out
@@ -119,7 +119,7 @@ class AlphaDivergenceLoss(nn.Module):
             mu    : (1, P) - mean for each weight in BNN. 
             sigma : (1, P) - variance for each weight in BNN.
     """
-    def f_w(self, W, mu, sigma):
+    def calc_f_w(self, W, mu, sigma):
         K = W.shape[0]
         # Convert mu and sigma to tiled (K, P) matrices for easier computations below.
         mu = torch.cat([mu for i in range(K)], dim=0)
@@ -143,55 +143,69 @@ class AlphaDivergenceLoss(nn.Module):
             mu    : (B, 1) - mean for each z value. 
             sigma : (B, 1) - variance for each z value.
     """
-    def f_z(self, Z, mu, sigma):
+    def calc_f_z(self, Z, mu, sigma):
         out = torch.mul(torch.div(sigma - self.gam, self.gam * sigma), Z * Z) + \
                     torch.mul(torch.div(mu, sigma), Z)
         out = torch.exp(out)
 
+    def flatten_parameter_matrices(self, weight_params, z_params):
+        pass
+
     def forward(self, weight_params, z_params, true_labs):
         batch_size = true_labs.shape[0]
+        set_trace()
+        w_mu = torch.from_numpy(np.array(weight_params['mus']))
         weight_dists = self.set_up_distributions(weight_params)
         z_dists = self.set_up_distributions(z_params)
-        W = self.sample_bnn_weights(weight_dists)
+        W = self.sample_batches(weight_dists, self.K)
+        Z = self.sample_batches(z_dists, batch_size)
+        f_w = calc_f_w(W, w_mu, w_sigma)
+        f_z = calc_f_z(Z, z_mu, z_sigma)
         loss = -self.log_normalizer() - (1.0 / self.alpha)
 
 
-class BayesianNeuralNetwork(object):
+class BayesianNeuralNetwork(nn.Module):
 
 
-    def __init__(self, p):
+    def __init__(self, N, p):
+        super(BayesianNeuralNetwork, self).__init__()
         input_size = p + 1 # Additional feature for stochastic disturbance.
+        self.N = N
         self.neural_net = NeuralNetwork(input_size)
         self.weight_var = 10
         self.z_var = p
 
+        self.w_mu, self.w_sigma = self.set_up_model_priors(self.neural_net)
+        self.z_mu, self.z_sigma = self.set_up_z_priors(self.N)
+        self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
+                list(self.z_mu) + list(self.z_sigma)
+
     def set_up_model_priors(self, det_model, use_xavier=False):
-        train_params = map()
-        train_params['mus'] = list()
-        train_params['sigmas'] = list()
+        train_mus = nn.ParameterList()
+        train_sigmas = nn.ParameterList()
         for name, param in det_model.named_parameters():
-            mu = torch.zeros(param.shape, requires_grad=True)
-            train_params['mus'].append(mu)
+            mu = nn.Parameter(torch.zeros(param.shape))
+            train_mus.append(mu)
             if use_xavier:
                 sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
             else:
-                sigma = torch.tensor(self.weight_var * torch.ones(param.shape), \
-                                     requires_grad=True)
-            train_params['sigmas'].append(sigma)
+                sigma = nn.Parameter(self.weight_var * torch.ones(param.shape))
+            train_sigmas.append(sigma)
             # TODO(dbthaker): How to ensure independent sampling for each weight?
             # Answer: Should be fine. See:
             #     https://pytorch.org/docs/master/_modules/torch/distributions/normal.html
             #prior_dict[name] = dists.normal.Normal(mu, sigma)
-        return train_params
+        return train_mus, train_sigmas
 
-    def set_up_z(self, N):
-        z = dict()
-        # TODO(dbthaker): This should be batchified eventually!
+    def set_up_z_priors(self, N):
+        train_mus = nn.ParameterList()
+        train_sigmas = nn.ParameterList()
         for i in range(N):
-            sigma = torch.tensor(self.z_var, requires_grad=True)
-            z_i = dists.normal.Normal(0, sigma)
-            z[i] = z_i
-        return z
+            mu = nn.Parameter(torch.tensor(0).reshape((1)))
+            sigma = nn.Parameter(torch.tensor(self.z_var).reshape((1)))
+            train_mus.append(mu)
+            train_sigmas.append(sigma)
+        return train_mus, train_sigmas
 
     def sample_from_dists(self, dists):
         sampled_values = dict()
@@ -210,13 +224,11 @@ class BayesianNeuralNetwork(object):
             print("{}: {}".format(name, param.data.numpy()))
         print("-----------------------------------------------")
 
-    def run_inference(self, data, alpha=0.5):
-        N = data.shape[0]
-        weights_params = self.set_up_model_priors(self.neural_net)
-        self.sample_bnn(self.neural_net, priors)
+    def forward(self, X, y, alpha=0.5):
+        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-3)
+        self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, N, N)
 
-        self.optimizer = torch.optim.Adam(weights_params, lr=1e-3)
-        self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, N)
+        loss = self.loss(weight_params, z_params, y)
 
         self.optimizer.zero_grad() 
         self.optimizer.step()
@@ -225,8 +237,8 @@ def main():
     N = 1000
     (X, y), ground_truth_fn = build_toy_dataset2(N, plot_data=False)
     p = X.shape[1]
-    bnn = BayesianNeuralNetwork(p)
-    bnn.run_inference()
+    bnn = BayesianNeuralNetwork(N, p)
+    bnn.forward(X, y)
 
 if __name__ == '__main__':
     main()
