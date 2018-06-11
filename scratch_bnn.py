@@ -74,7 +74,8 @@ class AlphaDivergenceLoss(nn.Module):
     def sample_from_dists(self, inp_dists):
         sampled_values = list()
         for v in inp_dists:
-            # Flatten if matrices.
+            # rsample() uses reparameterization trick (Kingma et al. 2014)
+            # to give differentiable sample.
             sampled_values.append(v.rsample().reshape((1, -1)))
         sampled_values = torch.cat(sampled_values, dim=1)
         return sampled_values
@@ -173,7 +174,7 @@ class AlphaDivergenceLoss(nn.Module):
         # TODO(dbthaker): Make this log_f_w and log_f_z for numerical stability?
         prod = torch.mm(f_w.transpose(0, 1), f_z)
         # Average across K values of W ~ q to approximate expectation.
-        exponent = self.alpha * ll - prod 
+        exponent = self.alpha * ll - torch.log(prod)
         out = self.log_sum_exp(exponent) / self.K
         out = torch.sum(out) / self.alpha
         return out
@@ -207,6 +208,7 @@ class BayesianNeuralNetwork(nn.Module):
         self.neural_net = NeuralNetwork(input_size)
         self.w_var = 10
         self.z_var = p
+        # TODO(dbthaker): Figure out how to optimize this variable too.
         self.additive_noise = nn.Parameter(20 * torch.ones(1))
 
         self.w_mu, self.w_sigma = self.set_up_model_priors(self.neural_net)
@@ -225,10 +227,6 @@ class BayesianNeuralNetwork(nn.Module):
             else:
                 sigma = nn.Parameter(self.w_var * torch.ones(param.shape))
             train_sigmas.append(sigma)
-            # TODO(dbthaker): How to ensure independent sampling for each weight?
-            # Answer: Should be fine. See:
-            #     https://pytorch.org/docs/master/_modules/torch/distributions/normal.html
-            #prior_dict[name] = dists.normal.Normal(mu, sigma)
         return train_mus, train_sigmas
 
     def set_up_z_priors(self, N):
@@ -244,7 +242,7 @@ class BayesianNeuralNetwork(nn.Module):
     def sample_from_dists(self, dists):
         sampled_values = dict()
         for (k, v) in dists.items():
-            sampled_values[k] = v.rsample()
+            sampled_values[k] = v.sample()
         return sampled_values
 
     # DANGER: In-place modification of det_model weights.
