@@ -53,7 +53,7 @@ class NeuralNetwork(nn.Module):
 class AlphaDivergenceLoss(nn.Module):
 
 
-    def __init__(self, alpha, lam, gam, N, K):
+    def __init__(self, alpha, lam, gam, N, K, neural_net):
         super(AlphaDivergenceLoss, self).__init__()
         self.alpha = alpha
         # Prior variance for weights.
@@ -64,6 +64,7 @@ class AlphaDivergenceLoss(nn.Module):
         self.N = N
         # Number of neural nets to approximate expectations over q.
         self.K = K
+        self.nn = neural_net
 
     def set_up_distributions(self, mus, sigmas):
         out_dists = list()
@@ -71,21 +72,32 @@ class AlphaDivergenceLoss(nn.Module):
             out_dists.append(dists.normal.Normal(mu, sigma))
         return out_dists
 
-    def sample_from_dists(self, inp_dists):
-        sampled_values = list()
-        for v in inp_dists:
-            # rsample() uses reparameterization trick (Kingma et al. 2014)
-            # to give differentiable sample.
-            sampled_values.append(v.rsample().reshape((1, -1)))
-        sampled_values = torch.cat(sampled_values, dim=1)
-        return sampled_values
+    def sample_from_dists(self, inp_dists, use_nn=False):
+        sampled_values = dict()
+        flattened_values = list()
+        if use_nn:
+            for ((name, _), v) in zip(self.nn.named_parameters(), inp_dists):
+                # rsample() uses reparameterization trick (Kingma et al. 2014)
+                # to give differentiable sample.
+                sample = v.rsample()
+                sampled_values[name] = sample
+                flattened_values.append(sample.reshape((1, -1)))
+        else:
+            for (i, v) in enumerate(inp_dists):
+                sample = v.rsample()
+                sampled_values[i] = sample
+                flattened_values.append(sample.reshape((1, -1)))
+        flattened_values = torch.cat(flattened_values, dim=1)
+        return flattened_values, sampled_values
 
-    def sample_batches(self, weight_dists, num_rows, P):
+    def sample_batches(self, weight_dists, num_rows, P, use_nn=False):
         out = torch.zeros((num_rows, P))
+        w_out = list()
         for i in range(num_rows):
-            sample = self.sample_from_dists(weight_dists)
+            sample, s = self.sample_from_dists(weight_dists, use_nn=use_nn)
             out[i, :] = sample
-        return out
+            w_out.append(s)
+        return out, w_out
 
     """
         Computes log normalization constant of exponential Gaussian form of q.
@@ -179,7 +191,20 @@ class AlphaDivergenceLoss(nn.Module):
         out = torch.sum(out) / self.alpha
         return out
 
-    def forward(self, w_mu, w_sigma, z_mu, z_sigma, ll, true_labs):
+    def calc_log_likelihood(self, X, Z, ws, y, det_model, an):
+        lls = torch.zeros((len(ws), 1))
+        for (i, w) in enumerate(ws):
+            det_model.load_state_dict(w)
+            Zt = Z.transpose(0, 1)
+            disturbed_X = torch.cat([X, Zt], dim=1)
+            prediction = det_model(disturbed_X)
+            predictive_dist = dists.normal.Normal(prediction, an)
+            probs = predictive_dist.log_prob(y)
+            log_likelihood = torch.sum(probs, dim=0)
+            lls[i] = log_likelihood
+        return lls
+
+    def forward(self, w_mu, w_sigma, z_mu, z_sigma, an, X, true_labs):
         batch_size = true_labs.shape[0]
         weight_dists = self.set_up_distributions(w_mu, w_sigma)
         z_dists = self.set_up_distributions(z_mu, z_sigma)
@@ -188,8 +213,10 @@ class AlphaDivergenceLoss(nn.Module):
         flat_z_mu = self.flatten(z_mu)
         flat_z_sigma = self.flatten(z_sigma)
 
-        W = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1])
-        Z = self.sample_batches(z_dists, 1, batch_size)
+        W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1], \
+                use_nn=True)
+        Z, _ = self.sample_batches(z_dists, 1, batch_size)
+        ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, self.nn, an)
         f_w = self.calc_f_w(W, flat_w_mu, flat_w_sigma)
         f_z = self.calc_f_z(Z, flat_z_mu, flat_z_sigma)
         lad = self.calc_local_alpha_divs(f_w, f_z, ll)
@@ -203,13 +230,13 @@ class BayesianNeuralNetwork(nn.Module):
 
     def __init__(self, N, p):
         super(BayesianNeuralNetwork, self).__init__()
-        input_size = p # Additional feature for stochastic disturbance.
+        input_size = p + 1 # Additional feature for stochastic disturbance.
         self.N = N
         self.neural_net = NeuralNetwork(input_size)
-        self.w_var = 10
+        self.w_var = 1
         self.z_var = p
         # TODO(dbthaker): Figure out how to optimize this variable too.
-        self.additive_noise = nn.Parameter(20 * torch.ones(1))
+        self.additive_noise = nn.Parameter(torch.ones(1))
 
         self.w_mu, self.w_sigma = self.set_up_model_priors(self.neural_net)
         self.z_mu, self.z_sigma = self.set_up_z_priors(self.N)
@@ -239,16 +266,32 @@ class BayesianNeuralNetwork(nn.Module):
             train_sigmas.append(sigma)
         return train_mus, train_sigmas
 
-    def sample_from_dists(self, dists):
+    def get_distributions(self, det_model, w_mu, w_sigma):
+        out_dists = dict()
+        for ((name, _), mu, sigma) in zip(det_model.named_parameters(), \
+                   w_mu, w_sigma):
+            out_dists[name] = dists.normal.Normal(mu, sigma) 
+        return out_dists
+
+    def sample_from_dists(self, w_dists):
         sampled_values = dict()
-        for (k, v) in dists.items():
+        for (k, v) in w_dists.items():
             sampled_values[k] = v.sample()
         return sampled_values
 
     # DANGER: In-place modification of det_model weights.
-    def sample_bnn(self, det_model, weight_distributions):
-        sampled_weights = self.sample_from_dists(weight_distributions)
+    def sample_bnn(self, det_model, w_mu, w_sigma):
+        w_dists = self.get_distributions(det_model, w_mu, w_sigma)
+        sampled_weights = self.sample_from_dists(w_dists)
         det_model.load_state_dict(sampled_weights)
+
+    def sample_z(self, X):
+        z = torch.zeros((X.shape[0], 1))
+        i = 0
+        for i in range(X.shape[0]):
+            z[i, :] = dists.normal.Normal(0, self.z_var).sample()
+            i += 1
+        return z
 
     def _print_weights(self, model):
         print("-----------------------------------------------")
@@ -257,6 +300,7 @@ class BayesianNeuralNetwork(nn.Module):
         print("-----------------------------------------------")
 
     def calc_log_likelihood(self, X, y):
+        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
         prediction = self.neural_net(X)
         predictive_dist = dists.normal.Normal(prediction, self.additive_noise)
         probs = predictive_dist.log_prob(y)
@@ -264,20 +308,56 @@ class BayesianNeuralNetwork(nn.Module):
         return log_likelihood
 
     def calc_loss(self, X, y):
-        log_likelihood = self.calc_log_likelihood(X, y)
         return self.loss(self.w_mu, self.w_sigma, self.z_mu, self.z_sigma, \
-            log_likelihood, y)
+            self.additive_noise, X, y)
 
+    # Run inference.
     def forward(self, X, y, alpha=0.5):
-        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
-        self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25)
+        #self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-3)
+        self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25, \
+                self.neural_net)
 
-        for i in range(1000):
+        for i in range(100):
             loss = self.calc_loss(X, y)
             self.optimizer.zero_grad()
             loss.backward() 
             self.optimizer.step()
-            print("[{}] Loss: {}".format(i, loss.item()))
+            if i % 1 == 0:
+                #ll = self.calc_log_likelihood(X, y)
+                print("[{}] Loss: {}".format(i, loss.item()))
+
+    def predict(self, domain, ground_truth_fn):
+        assert len(domain) == 2 # [Start, end]
+        num_points = 100
+        X = np.linspace(domain[0], domain[1], num=num_points).reshape((num_points, 1))
+        X = torch.tensor(X).type(torch.Tensor)
+        ground_truth = ground_truth_fn(X)
+        num_nns = 100
+        pred_ys = list()
+        for i in range(num_nns):
+            self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+            z = self.sample_z(X)
+            disturbed_X = torch.cat([X, z], dim=1).type(torch.Tensor)
+            y = self.neural_net(disturbed_X).squeeze(-1).detach().numpy()
+            #y = self.neural_net(X).squeeze(-1).detach().numpy()
+            pred_ys.append(y)
+        stacked_ys = np.stack(pred_ys)
+        mean_pred = np.mean(stacked_ys, axis=0)
+        sd = np.std(stacked_ys, axis=0)
+        lb = mean_pred - sd
+        ub = mean_pred + sd
+        #tiled_xs = np.tile(X[:, 0], num_nns)
+        #tiled_ys = np.concatenate(pred_ys)
+        plt.plot(X.numpy(), ground_truth.numpy(), 'b', label='Ground Truth')
+        plt.plot(X.numpy(), mean_pred, 'r', label='Prediction mean')
+        plt.fill_between(X.squeeze(1).numpy(), ub, lb)
+        #plt.scatter(tiled_xs, tiled_ys, s=0.1, label='Predicted')
+        #plt.ylim(-10, 10)
+        plt.legend()
+        plt.show()
+        set_trace()
+
 
 def main():
     N = 1000
@@ -285,6 +365,7 @@ def main():
     p = X.shape[1]
     bnn = BayesianNeuralNetwork(N, p)
     bnn.forward(X, y)
+    bnn.predict((-4, 4), ground_truth_fn)
 
 if __name__ == '__main__':
     main()
