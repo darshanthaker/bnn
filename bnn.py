@@ -45,14 +45,17 @@ class BayesianNeuralNetwork(nn.Module):
         self.N = N
         self.neural_net = NeuralNetwork(input_size)
         self.w_var = 1
-        self.z_var = p
-        # TODO(dbthaker): Figure out how to optimize this variable too.
+        self.z_var = 0 # TODO(dbthaker): Change this back to p at some point.
+        noise_lst = nn.ParameterList()
         self.additive_noise = nn.Parameter(torch.ones(1))
+        noise_lst.append(self.additive_noise)
 
         self.w_mu, self.w_sigma = self.set_up_model_priors(self.neural_net)
         self.z_mu, self.z_sigma = self.set_up_z_priors(self.N)
-        self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
-                list(self.z_mu) + list(self.z_sigma)
+        #self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
+        #        list(self.z_mu) + list(self.z_sigma) + list(noise_lst)
+        self.trainable_params = list(self.w_mu) + list(self.w_sigma)
+        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-1)
 
     def set_up_model_priors(self, det_model, use_xavier=False):
         train_mus = nn.ParameterList()
@@ -123,21 +126,29 @@ class BayesianNeuralNetwork(nn.Module):
             self.additive_noise, X, y)
 
     # Run inference.
-    def forward(self, X, y, alpha=0.5):
+    def forward(self, X, y, alpha=1):
         self._print_weights(self.neural_net)
         #self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
-        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-3)
         self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25, \
                 self.neural_net)
 
-        for i in range(100):
-            loss = self.calc_loss(X, y)
+        all_losses = list()
+        num_epochs = 1000
+        for i in range(num_epochs):
+            loss, ll = self.calc_loss(X, y)
+            all_losses.append(loss)
             self.optimizer.zero_grad()
             loss.backward() 
+            #print(self.w_mu[0])
+            for group in self.optimizer.param_groups:
+                for p in group['params']:
+                    if p.grad is not None:
+                        print("YAY NON NONE GRADIENT!!!")
             self.optimizer.step()
             if i % 1 == 0:
-                #ll = self.calc_log_likelihood(X, y)
-                print("[{}] Loss: {}".format(i, loss.item()))
+                print("[{}] Loss: {}, LL: {}, AN: {}".format(i, loss.item(), ll[0], self.additive_noise[0]))
+        plt.plot(range(num_epochs), all_losses)
+        plt.show()
 
     def predict(self, domain, ground_truth_fn):
         assert len(domain) == 2 # [Start, end]
@@ -151,7 +162,8 @@ class BayesianNeuralNetwork(nn.Module):
         self._print_weights(self.neural_net)
         for i in range(num_nns):
             self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
-            z = self.sample_z(X)
+            #z = self.sample_z(X)
+            z = torch.zeros(X.shape)
             disturbed_X = torch.cat([X, z], dim=1).type(torch.Tensor)
             y = self.neural_net(disturbed_X).squeeze(-1).detach().numpy()
             #y = self.neural_net(X).squeeze(-1).detach().numpy()

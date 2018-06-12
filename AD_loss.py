@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.distributions as dists
 
+from neural_network import NeuralNetwork
 from pdb import set_trace
 
 class AlphaDivergenceLoss(nn.Module):
@@ -73,7 +74,8 @@ class AlphaDivergenceLoss(nn.Module):
         z_normalizer = 0.5 * torch.log(2 * math.pi * z_sigma) + \
                     torch.div(z_mu * z_mu, z_sigma)
         z_normalizer = torch.sum(z_normalizer, dim=1)
-        return -torch.log(w_normalizer + z_normalizer)
+        #return -torch.log(w_normalizer + z_normalizer)
+        return -torch.log(w_normalizer)
 
     """
         Computes f(W), which is in exponential Gaussian form and proportional to
@@ -156,28 +158,79 @@ class AlphaDivergenceLoss(nn.Module):
             prediction = det_model(disturbed_X)
             predictive_dist = dists.normal.Normal(prediction, an)
             probs = predictive_dist.log_prob(y)
+            #set_trace()
             log_likelihood = torch.sum(probs, dim=0)
             lls[i] = log_likelihood
-        return lls
+        mean_lls = torch.sum(lls, dim=0) / len(ws)
+        return mean_lls
+
+    def tmp_calc_log_likelihood(self, X, Z, w, y, det_model, an):
+        det_model.load_state_dict(w)
+        Zt = Z.transpose(0, 1)
+        disturbed_X = torch.cat([X, Zt], dim=1)
+        prediction = det_model(disturbed_X)
+        predictive_dist = dists.normal.Normal(prediction, an)
+        probs = predictive_dist.log_prob(y)
+        #set_trace()
+        log_likelihood = torch.sum(probs, dim=0)
+        return log_likelihood
 
     def forward(self, w_mu, w_sigma, z_mu, z_sigma, an, X, true_labs):
         batch_size = true_labs.shape[0]
-        weight_dists = self.set_up_distributions(w_mu, w_sigma)
-        z_dists = self.set_up_distributions(z_mu, z_sigma)
-        flat_w_mu = self.flatten(w_mu)
-        flat_w_sigma = self.flatten(w_sigma)
-        flat_z_mu = self.flatten(z_mu)
-        flat_z_sigma = self.flatten(z_sigma)
+        #weight_dists = self.set_up_distributions(w_mu, w_sigma)
+        #z_dists = self.set_up_distributions(z_mu, z_sigma)
+        #flat_w_mu = self.flatten(w_mu)
+        #flat_w_sigma = self.flatten(w_sigma)
+        #flat_z_mu = self.flatten(z_mu)
+        #flat_z_sigma = self.flatten(z_sigma)
 
-        W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1], \
-                use_nn=True)
-        Z, _ = self.sample_batches(z_dists, 1, batch_size)
-        ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, self.nn, an)
-        f_w = self.calc_f_w(W, flat_w_mu, flat_w_sigma)
-        f_z = self.calc_f_z(Z, flat_z_mu, flat_z_sigma)
+        #W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1], \
+        #        use_nn=True)
+        #Z, _ = self.sample_batches(z_dists, 1, batch_size)
+        Z = torch.zeros((1, batch_size))
+        #ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, self.nn, an)
+        nets_w = dict()
+        for ((name, _), mu) in zip(self.nn.named_parameters(), w_mu):
+            nets_w[name] = mu
+        ll = self.tmp_calc_log_likelihood(X, Z, nets_w, true_labs, self.nn, an)
+        #f_w = self.calc_f_w(W, flat_w_mu, flat_w_sigma)
+        #f_z = self.calc_f_z(Z, flat_z_mu, flat_z_sigma)
+        f_w = torch.ones((1, self.K))
+        f_z = torch.ones((1, batch_size))
         lad = self.calc_local_alpha_divs(f_w, f_z, ll)
+        #set_trace()
         
-        loss = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
-                flat_z_mu, flat_z_sigma) - lad
-        return loss
+        #loss = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
+        #        flat_z_mu, flat_z_sigma) - lad
+        loss = -lad
+        return loss, ll
 
+def main():
+    net = NeuralNetwork(2)
+    w_mu = list()
+    w_sigma = list()
+    z_mu = list()
+    z_sigma = list()
+    an = 10
+    w = dict()
+    for (name, param) in net.named_parameters():
+        w[name] = torch.ones(param.shape)
+        w_mu.append(torch.ones(param.shape))
+        w_sigma.append(1e-4 * torch.ones(param.shape))
+
+    for i in range(4):
+        z_mu.append(torch.ones(1))
+        z_sigma.append(1e-4 * torch.ones(1))
+
+    net.load_state_dict(w)
+
+    X = torch.from_numpy(np.array([[0, 1, 2, 3]])).type(torch.Tensor).transpose(0, 1)
+    tmp_z = torch.ones((4, 1))
+    disturbed_X = torch.cat([X, tmp_z], dim=1)
+    y = net(disturbed_X)
+    loss = AlphaDivergenceLoss(0.5, 1e-4, 1e-4, 4, 1, net)
+    l = loss(w_mu, w_sigma, z_mu, z_sigma, an, X, y)
+    print("Loss: {}".format(l))
+
+if __name__=='__main__':
+    main()
