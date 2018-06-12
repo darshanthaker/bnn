@@ -47,11 +47,11 @@ class NeuralNetwork(nn.Module):
     def __init__(self, input_size):
         super(NeuralNetwork, self).__init__()
         self.network = nn.Sequential( \
-                nn.Linear(input_size, 50), \
+                nn.Linear(input_size, 5), \
                 nn.ReLU(), \
-                nn.Linear(50, 50), \
+                nn.Linear(5, 5), \
                 nn.ReLU(), \
-                nn.Linear(50, 1))
+                nn.Linear(5, 1))
 
     def forward(self, x):
         return self.network(x)
@@ -213,7 +213,7 @@ def main():
     N = 1000
     (X, y), ground_truth_fn = build_toy_dataset2(N, plot_data=True)
     p = X.shape[1]
-    model = "bnn"
+    model = "vanilla"
     if model == "vanilla":
         trainer = VanillaSGDTrainer(p)
         trainer.train(X, y)
