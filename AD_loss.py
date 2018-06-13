@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 import torch.distributions as dists
 
-from neural_network import NeuralNetwork
+from numbers import Number
+from neural_network import NeuralNetwork, FNeuralNetwork
 from pdb import set_trace
 
 class AlphaDivergenceLoss(nn.Module):
@@ -22,6 +23,7 @@ class AlphaDivergenceLoss(nn.Module):
         # Number of neural nets to approximate expectations over q.
         self.K = K
         self.nn = neural_net
+        self.f_nn = FNeuralNetwork()
 
     def set_up_distributions(self, mus, sigmas):
         out_dists = list()
@@ -30,19 +32,19 @@ class AlphaDivergenceLoss(nn.Module):
         return out_dists
 
     def sample_from_dists(self, inp_dists, use_nn=False):
-        sampled_values = dict()
+        sampled_values = list()
         flattened_values = list()
         if use_nn:
             for ((name, _), v) in zip(self.nn.named_parameters(), inp_dists):
                 # rsample() uses reparameterization trick (Kingma et al. 2014)
                 # to give differentiable sample.
                 sample = v.rsample()
-                sampled_values[name] = sample
+                sampled_values.append(sample)
                 flattened_values.append(sample.reshape((1, -1)))
         else:
             for (i, v) in enumerate(inp_dists):
                 sample = v.rsample()
-                sampled_values[i] = sample
+                sampled_values.append(sample)
                 flattened_values.append(sample.reshape((1, -1)))
         flattened_values = torch.cat(flattened_values, dim=1)
         return flattened_values, sampled_values
@@ -149,60 +151,59 @@ class AlphaDivergenceLoss(nn.Module):
         out = torch.sum(out) / self.alpha
         return out
 
-    def calc_log_likelihood(self, X, Z, ws, y, det_model, an):
+    def calc_log_likelihood(self, X, Z, ws, y, an):
         lls = torch.zeros((len(ws), 1))
         for (i, w) in enumerate(ws):
-            det_model.load_state_dict(w)
             Zt = Z.transpose(0, 1)
             disturbed_X = torch.cat([X, Zt], dim=1)
-            prediction = det_model(disturbed_X)
-            predictive_dist = dists.normal.Normal(prediction, an)
-            probs = predictive_dist.log_prob(y)
-            #set_trace()
+            #prediction = self.f_nn(disturbed_X, w)
+            prediction = self.f_nn(X, w)
+            probs = self.normal_log_prob(prediction, an, y)
             log_likelihood = torch.sum(probs, dim=0)
             lls[i] = log_likelihood
         mean_lls = torch.sum(lls, dim=0) / len(ws)
         return mean_lls
 
-    def tmp_calc_log_likelihood(self, X, Z, w, y, det_model, an):
-        det_model.load_state_dict(w)
+    def normal_log_prob(self, mu, sigma, val):
+        var = sigma ** 2
+        log_scale = math.log(sigma) if isinstance(sigma, Number) else sigma.log()
+        return -((val - mu) ** 2) / (2 * var) - log_scale - math.log(math.sqrt(2 * math.pi)) 
+
+    def tmp_calc_log_likelihood(self, X, Z, w, y, an):
         Zt = Z.transpose(0, 1)
         disturbed_X = torch.cat([X, Zt], dim=1)
-        prediction = det_model(disturbed_X)
-        predictive_dist = dists.normal.Normal(prediction, an)
-        probs = predictive_dist.log_prob(y)
-        #set_trace()
+        nets_w = dict()
+        #prediction = self.f_nn(disturbed_X, w)
+        prediction = self.f_nn(X, w)
+        probs = self.normal_log_prob(prediction, an, y) 
         log_likelihood = torch.sum(probs, dim=0)
         return log_likelihood
 
     def forward(self, w_mu, w_sigma, z_mu, z_sigma, an, X, true_labs):
         batch_size = true_labs.shape[0]
-        #weight_dists = self.set_up_distributions(w_mu, w_sigma)
+        weight_dists = self.set_up_distributions(w_mu, w_sigma)
         #z_dists = self.set_up_distributions(z_mu, z_sigma)
-        #flat_w_mu = self.flatten(w_mu)
-        #flat_w_sigma = self.flatten(w_sigma)
-        #flat_z_mu = self.flatten(z_mu)
-        #flat_z_sigma = self.flatten(z_sigma)
+        flat_w_mu = self.flatten(w_mu)
+        flat_w_sigma = self.flatten(w_sigma)
+        flat_z_mu = self.flatten(z_mu)
+        flat_z_sigma = self.flatten(z_sigma)
 
-        #W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1], \
-        #        use_nn=True)
+        W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1], \
+                use_nn=True)
         #Z, _ = self.sample_batches(z_dists, 1, batch_size)
         Z = torch.zeros((1, batch_size))
-        #ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, self.nn, an)
-        nets_w = dict()
-        for ((name, _), mu) in zip(self.nn.named_parameters(), w_mu):
-            nets_w[name] = mu
-        ll = self.tmp_calc_log_likelihood(X, Z, nets_w, true_labs, self.nn, an)
-        #f_w = self.calc_f_w(W, flat_w_mu, flat_w_sigma)
+        ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, an)
+        #ll = self.tmp_calc_log_likelihood(X, Z, w_mu, true_labs, an)
+        f_w = self.calc_f_w(W, flat_w_mu, flat_w_sigma)
         #f_z = self.calc_f_z(Z, flat_z_mu, flat_z_sigma)
-        f_w = torch.ones((1, self.K))
+        #f_w = torch.ones((1, self.K))
         f_z = torch.ones((1, batch_size))
         lad = self.calc_local_alpha_divs(f_w, f_z, ll)
         #set_trace()
         
-        #loss = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
-        #        flat_z_mu, flat_z_sigma) - lad
-        loss = -lad
+        loss = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
+                flat_z_mu, flat_z_sigma) - lad
+        #loss = -lad
         return loss, ll
 
 def main():

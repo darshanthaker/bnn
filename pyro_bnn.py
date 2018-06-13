@@ -47,11 +47,13 @@ class NeuralNetwork(nn.Module):
     def __init__(self, input_size):
         super(NeuralNetwork, self).__init__()
         self.network = nn.Sequential( \
-                nn.Linear(input_size, 5), \
+                nn.Linear(input_size, 50), \
                 nn.ReLU(), \
-                nn.Linear(5, 5), \
+                nn.Linear(50, 50), \
                 nn.ReLU(), \
-                nn.Linear(5, 1))
+                nn.Linear(50, 50), \
+                nn.ReLU(), \
+                nn.Linear(50, 1))
 
     def forward(self, x):
         return self.network(x)
@@ -91,7 +93,7 @@ class VanillaSGDTrainer(object):
         ground_truth = ground_truth_fn(X).numpy()
         y = self.neural_net(X).squeeze(-1).detach().numpy()
         plt.plot(X.numpy(), ground_truth, 'b', label='Ground truth')
-        plt.scatter(X, y, s=1, label='Predicted')
+        plt.scatter(X, y, s=10, label='Predicted')
         plt.legend()
         plt.show()
 

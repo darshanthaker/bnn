@@ -5,6 +5,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import torch.distributions as dists
 
+from sklearn.preprocessing import MinMaxScaler
 from neural_network import NeuralNetwork
 from AD_loss import AlphaDivergenceLoss
 from pdb import set_trace
@@ -14,7 +15,7 @@ from pdb import set_trace
 # Noisy estimate (heteroskedastic noise): y = 7sin(x) + 3|cos(x/2)|*noise
 # Domain: [-4, 4)
 # N: Number of data points to sample.
-def build_toy_dataset2(N, plot_data=False):
+def build_toy_dataset2(N, plot_data=True):
     X = np.random.uniform(low=-4, high=4, size=N)
     sorted_X = np.sort(X)
     sin_scale = 7
@@ -24,6 +25,10 @@ def build_toy_dataset2(N, plot_data=False):
     ground_truth_fn = lambda x: sin_scale * np.sin(x)
     ground_truth = ground_truth_fn(sorted_X)
     X = np.reshape(X, (N, 1))
+    sorted_X = np.reshape(sorted_X, (N, 1))
+    #min_max_scaler = MinMaxScaler()
+    #X = min_max_scaler.fit_transform(X)
+    #sorted_X = min_max_scaler.fit_transform(sorted_X)
     y = np.reshape(y, (N, 1))
     if plot_data:
         plt.plot(X, y, 'ro', label='Generated Data')
@@ -41,11 +46,11 @@ class BayesianNeuralNetwork(nn.Module):
 
     def __init__(self, N, p):
         super(BayesianNeuralNetwork, self).__init__()
-        input_size = p + 1 # Additional feature for stochastic disturbance.
+        input_size = p # Additional feature for stochastic disturbance.
         self.N = N
         self.neural_net = NeuralNetwork(input_size)
-        self.w_var = 1
-        self.z_var = 0 # TODO(dbthaker): Change this back to p at some point.
+        self.w_var = 1 # TODO(dbthaker): Change this back to 1 at some point.
+        self.z_var = p # TODO(dbthaker): Change this back to p at some point.
         noise_lst = nn.ParameterList()
         self.additive_noise = nn.Parameter(torch.ones(1))
         noise_lst.append(self.additive_noise)
@@ -55,13 +60,21 @@ class BayesianNeuralNetwork(nn.Module):
         #self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
         #        list(self.z_mu) + list(self.z_sigma) + list(noise_lst)
         self.trainable_params = list(self.w_mu) + list(self.w_sigma)
-        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-1)
+        #self.trainable_params = list(self.w_mu)
+        self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
 
     def set_up_model_priors(self, det_model, use_xavier=False):
         train_mus = nn.ParameterList()
         train_sigmas = nn.ParameterList()
         for name, param in det_model.named_parameters():
             mu = nn.Parameter(torch.zeros(param.shape))
+            sample_mu = torch.zeros(param.shape)
+            if 'bias' not in name:
+                sample_sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
+            else:
+                sample_sigma = torch.zeros(param.shape)
+            #mu = nn.Parameter(dists.normal.Normal(sample_mu, sample_sigma).sample())
+            #mu = nn.Parameter(param.clone())
             train_mus.append(mu)
             if use_xavier:
                 sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
@@ -107,43 +120,38 @@ class BayesianNeuralNetwork(nn.Module):
             i += 1
         return z
 
+    def _print_parameters(self):
+        print("--------------- PARAMETERS ------------------------")
+        for i in self.trainable_params:
+            print(i)
+        print("--------------- PARAMETERS ------------------------")
+
     def _print_weights(self, model):
-        print("-----------------------------------------------")
+        print("---------------- WEIGHTS -------------------------")
         for name, param in model.named_parameters():
             print("{}: {}".format(name, param.data.numpy()))
-        print("-----------------------------------------------")
-
-    def calc_log_likelihood(self, X, y):
-        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
-        prediction = self.neural_net(X)
-        predictive_dist = dists.normal.Normal(prediction, self.additive_noise)
-        probs = predictive_dist.log_prob(y)
-        log_likelihood = torch.sum(probs, dim=0)
-        return log_likelihood
-
-    def calc_loss(self, X, y):
-        return self.loss(self.w_mu, self.w_sigma, self.z_mu, self.z_sigma, \
-            self.additive_noise, X, y)
+        print("---------------- WEIGHTS -------------------------")
 
     # Run inference.
-    def forward(self, X, y, alpha=1):
+    def forward(self, X, y, alpha=0.5):
+        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
         self._print_weights(self.neural_net)
-        #self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
         self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25, \
                 self.neural_net)
 
         all_losses = list()
-        num_epochs = 1000
+        num_epochs = 500
         for i in range(num_epochs):
-            loss, ll = self.calc_loss(X, y)
+            loss, ll = self.loss(self.w_mu, self.w_sigma, self.z_mu, self.z_sigma, \
+                    self.additive_noise, X, y)
             all_losses.append(loss)
             self.optimizer.zero_grad()
             loss.backward() 
             #print(self.w_mu[0])
-            for group in self.optimizer.param_groups:
-                for p in group['params']:
-                    if p.grad is not None:
-                        print("YAY NON NONE GRADIENT!!!")
+            #for group in self.optimizer.param_groups:
+            #    for p in group['params']:
+            #        if p.grad is not None:
+            #            print("YAY NON NONE GRADIENT: {}".format(p.grad))
             self.optimizer.step()
             if i % 1 == 0:
                 print("[{}] Loss: {}, LL: {}, AN: {}".format(i, loss.item(), ll[0], self.additive_noise[0]))
@@ -154,19 +162,21 @@ class BayesianNeuralNetwork(nn.Module):
         assert len(domain) == 2 # [Start, end]
         num_points = 100
         X = np.linspace(domain[0], domain[1], num=num_points).reshape((num_points, 1))
-        X = torch.tensor(X).type(torch.Tensor)
         ground_truth = ground_truth_fn(X)
+        #min_max_scaler = MinMaxScaler()
+        #X = min_max_scaler.fit_transform(X)
+        X = torch.tensor(X).type(torch.Tensor)
         num_nns = 100
         pred_ys = list()
         self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
         self._print_weights(self.neural_net)
+        self._print_parameters()
         for i in range(num_nns):
             self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
-            #z = self.sample_z(X)
-            z = torch.zeros(X.shape)
+            z = self.sample_z(X)
             disturbed_X = torch.cat([X, z], dim=1).type(torch.Tensor)
-            y = self.neural_net(disturbed_X).squeeze(-1).detach().numpy()
-            #y = self.neural_net(X).squeeze(-1).detach().numpy()
+            #y = self.neural_net(disturbed_X).squeeze(-1).detach().numpy()
+            y = self.neural_net(X).squeeze(-1).detach().numpy()
             pred_ys.append(y)
         stacked_ys = np.stack(pred_ys)
         mean_pred = np.mean(stacked_ys, axis=0)
@@ -175,7 +185,7 @@ class BayesianNeuralNetwork(nn.Module):
         ub = mean_pred + sd
         #tiled_xs = np.tile(X[:, 0], num_nns)
         #tiled_ys = np.concatenate(pred_ys)
-        plt.plot(X.numpy(), ground_truth.numpy(), 'b', label='Ground Truth')
+        plt.plot(X.numpy(), ground_truth, 'b', label='Ground Truth')
         plt.plot(X.numpy(), mean_pred, 'r', label='Prediction mean')
         plt.fill_between(X.squeeze(1).numpy(), ub, lb)
         #plt.scatter(tiled_xs, tiled_ys, s=0.1, label='Predicted')
@@ -184,7 +194,7 @@ class BayesianNeuralNetwork(nn.Module):
         plt.show()
 
 def main():
-    N = 1000
+    N = 10000
     (X, y), ground_truth_fn = build_toy_dataset2(N, plot_data=False)
     p = X.shape[1]
     bnn = BayesianNeuralNetwork(N, p)
