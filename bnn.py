@@ -49,7 +49,7 @@ class BayesianNeuralNetwork(nn.Module):
         input_size = p # Additional feature for stochastic disturbance.
         self.N = N
         self.neural_net = NeuralNetwork(input_size)
-        self.w_var = 1 # TODO(dbthaker): Change this back to 1 at some point.
+        self.w_var = .5 # TODO(dbthaker): Change this back to 1 at some point.
         self.z_var = p # TODO(dbthaker): Change this back to p at some point.
         noise_lst = nn.ParameterList()
         self.additive_noise = nn.Parameter(torch.ones(1))
@@ -59,8 +59,8 @@ class BayesianNeuralNetwork(nn.Module):
         self.z_mu, self.z_sigma = self.set_up_z_priors(self.N)
         #self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
         #        list(self.z_mu) + list(self.z_sigma) + list(noise_lst)
+        #self.trainable_params = list(self.w_mu) + list(self.w_sigma)
         self.trainable_params = list(self.w_mu) + list(self.w_sigma)
-        #self.trainable_params = list(self.w_mu)
         self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
 
     def set_up_model_priors(self, det_model, use_xavier=False):
@@ -97,7 +97,8 @@ class BayesianNeuralNetwork(nn.Module):
         out_dists = dict()
         for ((name, _), mu, sigma) in zip(det_model.named_parameters(), \
                    w_mu, w_sigma):
-            out_dists[name] = dists.normal.Normal(mu, sigma) 
+            # TODO(dbthaker): Change 0 back to sigma at some point.
+            out_dists[name] = dists.normal.Normal(mu, 0) 
         return out_dists
 
     def sample_from_dists(self, w_dists):
@@ -140,7 +141,7 @@ class BayesianNeuralNetwork(nn.Module):
                 self.neural_net)
 
         all_losses = list()
-        num_epochs = 500
+        num_epochs = 200
         for i in range(num_epochs):
             loss, ll = self.loss(self.w_mu, self.w_sigma, self.z_mu, self.z_sigma, \
                     self.additive_noise, X, y)
