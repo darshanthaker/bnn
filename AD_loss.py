@@ -142,15 +142,17 @@ class AlphaDivergenceLoss(nn.Module):
     def normal_log_prob(self, mu, sigma, val):
         var = sigma ** 2
         log_scale = math.log(sigma) if isinstance(sigma, Number) else sigma.log()
-        return -((val - mu) ** 2) / (2 * var) - log_scale - math.log(math.sqrt(2 * math.pi)) 
+        return -((val - mu) ** 2) / (2 * var) - log_scale - \
+            math.log(math.sqrt(2 * math.pi)) 
 
     def calc_local_alpha_divs(self, f_w, f_z, ll):
         # Calculate product of each f(W)*f_i(z_i) for all z_i and W ~ q.
         # TODO(dbthaker): Make this log_f_w and log_f_z for numerical stability?
         #prod = torch.mm(f_w.transpose(0, 1), f_z)
-        prod = f_w
+        prod = f_w.transpose(0, 1)
         # Average across K values of W ~ q to approximate expectation.
-        exponent = self.alpha * ll - prod
+        #set_trace()
+        exponent = self.alpha * (ll - prod)
         out = self.log_sum_exp(exponent)
         out = torch.sum(out) / self.alpha
         return out
@@ -193,9 +195,10 @@ class AlphaDivergenceLoss(nn.Module):
         W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1])
         #Z, _ = self.sample_batches(z_dists, 1, batch_size)
         Z = torch.zeros((1, batch_size))
-        ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, an)
-        print("LL: {}".format(ll[0, 0].item()))
-        #ll = self.tmp_calc_log_likelihood(X, Z, w_mu, true_labs, an)
+        #ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, an)
+        #print("LL: {}".format(ll[0, 0].item()))
+        ll = self.tmp_calc_log_likelihood(X, Z, w_mu, true_labs, an)
+        print("LL: {}".format(ll[0].item()))
         f_w = self.calc_log_f_w(W, flat_w_mu, flat_w_sigma)
         print("Lf_w: {}".format(f_w[0, 0].item()))
         #f_z = self.calc_log_f_z(Z, flat_z_mu, flat_z_sigma)
@@ -205,6 +208,8 @@ class AlphaDivergenceLoss(nn.Module):
         nln = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
                 flat_z_mu, flat_z_sigma)
         print("LN: {}".format(-nln.item()))
+        #lz = flat_w_mu.shape[1] * 0.5 * np.log(2 * math.pi * self.lam)
+        #print("LZ: {}".format(lz))
         #set_trace()
         
         loss = nln - lad

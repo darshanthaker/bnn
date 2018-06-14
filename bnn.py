@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import torch.distributions as dists
+import pickle
 
 from sklearn.preprocessing import MinMaxScaler
 from neural_network import NeuralNetwork
@@ -49,7 +50,7 @@ class BayesianNeuralNetwork(nn.Module):
         input_size = p # Additional feature for stochastic disturbance.
         self.N = N
         self.neural_net = NeuralNetwork(input_size)
-        self.w_var = 1 # TODO(dbthaker): Change this back to 1 at some point.
+        self.w_var = 0.1 # TODO(dbthaker): Change this back to 1 at some point.
         self.z_var = p # TODO(dbthaker): Change this back to p at some point.
         noise_lst = nn.ParameterList()
         self.additive_noise = nn.Parameter(torch.ones(1))
@@ -60,19 +61,22 @@ class BayesianNeuralNetwork(nn.Module):
         #self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
         #        list(self.z_mu) + list(self.z_sigma) + list(noise_lst)
         #self.trainable_params = list(self.w_mu) + list(self.w_sigma)
-        self.trainable_params = list(self.w_mu)
+        #self.trainable_params = list(self.w_mu)
+        self.trainable_params = list(self.w_sigma)
         self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
 
     def set_up_model_priors(self, det_model, use_xavier=False):
         train_mus = nn.ParameterList()
         train_sigmas = nn.ParameterList()
-        for name, param in det_model.named_parameters():
+        mus = pickle.load(open('saved_mu.pickle', 'rb'))
+        #for name, param in det_model.named_parameters():
+        for param in mus:
             #mu = nn.Parameter(torch.zeros(param.shape))
             sample_mu = torch.zeros(param.shape)
-            if 'bias' not in name:
-                sample_sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
-            else:
-                sample_sigma = torch.zeros(param.shape)
+            #if 'bias' not in name:
+            #    sample_sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
+            #else:
+            #    sample_sigma = torch.zeros(param.shape)
             #mu = nn.Parameter(dists.normal.Normal(sample_mu, sample_sigma).sample())
             mu = nn.Parameter(param.clone())
             train_mus.append(mu)
@@ -137,14 +141,14 @@ class BayesianNeuralNetwork(nn.Module):
             self.w_sigma[i] = nn.Parameter(torch.zeros(sigma.shape))
 
     # Run inference.
-    def forward(self, X, y, alpha=1):
+    def forward(self, X, y, alpha=-10):
         self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
         self._print_weights(self.neural_net)
         self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25, \
                 self.neural_net)
 
         all_losses = list()
-        num_epochs = 200
+        num_epochs = 50
         for i in range(num_epochs):
             loss, ll = self.loss(self.w_mu, self.w_sigma, self.z_mu, self.z_sigma, \
                     self.additive_noise, X, y)
@@ -172,7 +176,7 @@ class BayesianNeuralNetwork(nn.Module):
         X = torch.tensor(X).type(torch.Tensor)
         num_nns = 100
         pred_ys = list()
-        self._zero_out_sigma()
+        #self._zero_out_sigma()
         self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
         self._print_weights(self.neural_net)
         self._print_parameters()
@@ -184,7 +188,10 @@ class BayesianNeuralNetwork(nn.Module):
             y = self.neural_net(X).squeeze(-1).detach().numpy()
             pred_ys.append(y)
         stacked_ys = np.stack(pred_ys)
-        mean_pred = np.mean(stacked_ys, axis=0)
+        #mean_pred = np.mean(stacked_ys, axis=0)
+        self._zero_out_sigma()
+        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+        mean_pred = self.neural_net(X).squeeze(-1).detach().numpy()
         sd = np.std(stacked_ys, axis=0)
         lb = mean_pred - sd
         ub = mean_pred + sd
@@ -200,7 +207,7 @@ class BayesianNeuralNetwork(nn.Module):
 
 def main():
     N = 10000
-    (X, y), ground_truth_fn = build_toy_dataset2(N, plot_data=False)
+    (X, y), ground_truth_fn = build_toy_dataset2(N, plot_data=True)
     p = X.shape[1]
     bnn = BayesianNeuralNetwork(N, p)
     #bnn.predict((-4, 4), ground_truth_fn)
