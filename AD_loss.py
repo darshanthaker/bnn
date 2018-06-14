@@ -31,29 +31,23 @@ class AlphaDivergenceLoss(nn.Module):
             out_dists.append(dists.normal.Normal(mu, sigma))
         return out_dists
 
-    def sample_from_dists(self, inp_dists, use_nn=False):
+    def sample_from_dists(self, inp_dists):
         sampled_values = list()
         flattened_values = list()
-        if use_nn:
-            for ((name, _), v) in zip(self.nn.named_parameters(), inp_dists):
-                # rsample() uses reparameterization trick (Kingma et al. 2014)
-                # to give differentiable sample.
-                sample = v.rsample()
-                sampled_values.append(sample)
-                flattened_values.append(sample.reshape((1, -1)))
-        else:
-            for (i, v) in enumerate(inp_dists):
-                sample = v.rsample()
-                sampled_values.append(sample)
-                flattened_values.append(sample.reshape((1, -1)))
+        for (i, v) in enumerate(inp_dists):
+            # rsample() uses reparameterization trick (Kingma et al. 2014)
+            # to give differentiable sample.
+            sample = v.rsample()
+            sampled_values.append(sample)
+            flattened_values.append(sample.reshape((1, -1)))
         flattened_values = torch.cat(flattened_values, dim=1)
         return flattened_values, sampled_values
 
-    def sample_batches(self, weight_dists, num_rows, P, use_nn=False):
+    def sample_batches(self, weight_dists, num_rows, P):
         out = torch.zeros((num_rows, P))
         w_out = list()
         for i in range(num_rows):
-            sample, s = self.sample_from_dists(weight_dists, use_nn=use_nn)
+            sample, s = self.sample_from_dists(weight_dists)
             out[i, :] = sample
             w_out.append(s)
         return out, w_out
@@ -72,12 +66,15 @@ class AlphaDivergenceLoss(nn.Module):
     def negative_log_normalizer(self, w_mu, w_sigma, z_mu, z_sigma):
         w_normalizer = 0.5 * torch.log(2 * math.pi * w_sigma) + \
                     torch.div(w_mu * w_mu, w_sigma)
+        if torch.isnan(w_normalizer).any():
+            print("Elements of w_normalizer are NAN!")
+            set_trace()
         w_normalizer = torch.sum(w_normalizer, dim=1)
         z_normalizer = 0.5 * torch.log(2 * math.pi * z_sigma) + \
                     torch.div(z_mu * z_mu, z_sigma)
         z_normalizer = torch.sum(z_normalizer, dim=1)
-        #return -torch.log(w_normalizer + z_normalizer)
-        return -torch.log(w_normalizer)
+        #return -w_normalizer - z_normalizer
+        return -w_normalizer
 
     """
         Computes f(W), which is in exponential Gaussian form and proportional to
@@ -94,8 +91,11 @@ class AlphaDivergenceLoss(nn.Module):
         Output:
             out   : (1, K) - vector of f(W) for each sampled W ~ q.
     """
-    def calc_f_w(self, W, mu, sigma):
+    def calc_log_f_w(self, W, mu, sigma):
         K = W.shape[0]
+        P = W.shape[1]
+        assert mu.shape[1] == P
+        assert sigma.shape[1] == P
         # Convert mu and sigma to tiled (K, P) matrices for easier computations.
         mu = torch.cat([mu for i in range(K)], dim=0)
         sigma = torch.cat([sigma for i in range(K)], dim=0)
@@ -103,8 +103,7 @@ class AlphaDivergenceLoss(nn.Module):
         out = torch.mul(torch.div(sigma - self.lam, self.lam * sigma), W * W) + \
                     torch.mul(torch.div(mu, sigma), W)
         out /= self.N
-        out = torch.sum(out, dim=1)
-        out = torch.exp(out).reshape((1, K))
+        out = torch.sum(out, dim=1).reshape((1, K))
         return out
 
     """
@@ -120,10 +119,9 @@ class AlphaDivergenceLoss(nn.Module):
         Output:
             out   : (1, B) - vector of f_i(z_i) for each z_i value in mini-batch.
     """
-    def calc_f_z(self, Z, mu, sigma):
+    def calc_log_f_z(self, Z, mu, sigma):
         out = torch.mul(torch.div(sigma - self.gam, self.gam * sigma), Z * Z) + \
                     torch.mul(torch.div(mu, sigma), Z)
-        out = torch.exp(out)
         return out
 
     def flatten(self, param_lst):
@@ -141,12 +139,18 @@ class AlphaDivergenceLoss(nn.Module):
         out = torch.log(out) + maximum
         return out
 
+    def normal_log_prob(self, mu, sigma, val):
+        var = sigma ** 2
+        log_scale = math.log(sigma) if isinstance(sigma, Number) else sigma.log()
+        return -((val - mu) ** 2) / (2 * var) - log_scale - math.log(math.sqrt(2 * math.pi)) 
+
     def calc_local_alpha_divs(self, f_w, f_z, ll):
         # Calculate product of each f(W)*f_i(z_i) for all z_i and W ~ q.
         # TODO(dbthaker): Make this log_f_w and log_f_z for numerical stability?
-        prod = torch.mm(f_w.transpose(0, 1), f_z)
+        #prod = torch.mm(f_w.transpose(0, 1), f_z)
+        prod = f_w
         # Average across K values of W ~ q to approximate expectation.
-        exponent = self.alpha * ll - torch.log(prod)
+        exponent = self.alpha * ll - prod
         out = self.log_sum_exp(exponent)
         out = torch.sum(out) / self.alpha
         return out
@@ -162,12 +166,7 @@ class AlphaDivergenceLoss(nn.Module):
             log_likelihood = torch.sum(probs, dim=0)
             lls[i] = log_likelihood
         mean_lls = torch.sum(lls, dim=0) / len(ws)
-        return mean_lls
-
-    def normal_log_prob(self, mu, sigma, val):
-        var = sigma ** 2
-        log_scale = math.log(sigma) if isinstance(sigma, Number) else sigma.log()
-        return -((val - mu) ** 2) / (2 * var) - log_scale - math.log(math.sqrt(2 * math.pi)) 
+        return lls
 
     def tmp_calc_log_likelihood(self, X, Z, w, y, an):
         Zt = Z.transpose(0, 1)
@@ -188,21 +187,27 @@ class AlphaDivergenceLoss(nn.Module):
         flat_z_mu = self.flatten(z_mu)
         flat_z_sigma = self.flatten(z_sigma)
 
-        W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1], \
-                use_nn=True)
+        self.w_mu = w_mu
+        self.w_sigma = w_sigma
+
+        W, nets_w = self.sample_batches(weight_dists, self.K, flat_w_mu.shape[1])
         #Z, _ = self.sample_batches(z_dists, 1, batch_size)
         Z = torch.zeros((1, batch_size))
         ll = self.calc_log_likelihood(X, Z, nets_w, true_labs, an)
+        print("LL: {}".format(ll[0, 0].item()))
         #ll = self.tmp_calc_log_likelihood(X, Z, w_mu, true_labs, an)
-        f_w = self.calc_f_w(W, flat_w_mu, flat_w_sigma)
-        #f_z = self.calc_f_z(Z, flat_z_mu, flat_z_sigma)
+        f_w = self.calc_log_f_w(W, flat_w_mu, flat_w_sigma)
+        print("Lf_w: {}".format(f_w[0, 0].item()))
+        #f_z = self.calc_log_f_z(Z, flat_z_mu, flat_z_sigma)
         #f_w = torch.ones((1, self.K))
         f_z = torch.ones((1, batch_size))
         lad = self.calc_local_alpha_divs(f_w, f_z, ll)
+        nln = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
+                flat_z_mu, flat_z_sigma)
+        print("LN: {}".format(-nln.item()))
         #set_trace()
         
-        loss = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
-                flat_z_mu, flat_z_sigma) - lad
+        loss = nln - lad
         #loss = -lad
         return loss, ll
 
