@@ -20,7 +20,7 @@ def build_toy_dataset2(N, plot_data=True):
     X = np.random.uniform(low=-4, high=4, size=N)
     sorted_X = np.sort(X)
     sin_scale = 7
-    noise = np.random.normal(size=N) # Unit Gaussian noise.
+    noise = np.random.normal(0, 0.5, size=N) # Unit Gaussian noise.
     #y = 7 * np.sin(X) + 3 * np.multiply(np.abs(np.cos(X / 2)), noise)
     y = sin_scale * np.sin(X) + noise # Homoskedastic noise vs. heteroskedastic noise for now.
     ground_truth_fn = lambda x: sin_scale * np.sin(x)
@@ -49,30 +49,32 @@ class BayesianNeuralNetwork(nn.Module):
         super(BayesianNeuralNetwork, self).__init__()
         input_size = p # Additional feature for stochastic disturbance.
         self.N = N
-        self.neural_net = NeuralNetwork(input_size)
-        self.w_var = 0.1 # TODO(dbthaker): Change this back to 1 at some point.
-        self.z_var = p # TODO(dbthaker): Change this back to p at some point.
+        self.neural_net = NeuralNetwork(input_size, model='model1')
+        self.w_var = 1 # TODO(dbthaker): Change this back to 1 at some point.
+        self.z_var = 0 # TODO(dbthaker): Change this back to p at some point.
         noise_lst = nn.ParameterList()
-        self.additive_noise = nn.Parameter(torch.ones(1))
+        self.additive_noise = nn.Parameter(0.85 * torch.ones(1))
         noise_lst.append(self.additive_noise)
 
-        self.w_mu, self.w_sigma = self.set_up_model_priors(self.neural_net)
+        self.w_mu, self.log_w_sigma = self.set_up_model_priors(self.neural_net)
         self.z_mu, self.z_sigma = self.set_up_z_priors(self.N)
-        #self.trainable_params = list(self.w_mu) + list(self.w_sigma) + \
+        #self.trainable_params = list(self.w_mu) + list(self.log_w_sigma) + \
         #        list(self.z_mu) + list(self.z_sigma) + list(noise_lst)
-        #self.trainable_params = list(self.w_mu) + list(self.w_sigma)
+        #self.trainable_params = list(self.w_mu) + list(self.log_w_sigma)
         #self.trainable_params = list(self.w_mu)
-        self.trainable_params = list(self.w_sigma)
+        self.trainable_params = list(self.w_mu) + list(self.log_w_sigma) + list(noise_lst)
+        #self.trainable_params = list(self.log_w_sigma) + list(noise_lst)
+        #self.trainable_params = list(self.w_mu) + list(noise_lst)
         self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
 
     def set_up_model_priors(self, det_model, use_xavier=False):
         train_mus = nn.ParameterList()
-        train_sigmas = nn.ParameterList()
+        train_log_sigmas = nn.ParameterList()
         mus = pickle.load(open('saved_mu.pickle', 'rb'))
         #for name, param in det_model.named_parameters():
         for param in mus:
             #mu = nn.Parameter(torch.zeros(param.shape))
-            sample_mu = torch.zeros(param.shape)
+            #sample_mu = torch.zeros(param.shape)
             #if 'bias' not in name:
             #    sample_sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
             #else:
@@ -83,9 +85,9 @@ class BayesianNeuralNetwork(nn.Module):
             if use_xavier:
                 sigma = (2.0 / param.shape[-1]) * torch.ones(param.shape)
             else:
-                sigma = nn.Parameter(self.w_var * torch.ones(param.shape))
-            train_sigmas.append(sigma)
-        return train_mus, train_sigmas
+                log_sigma = nn.Parameter(self.w_var * torch.ones(param.shape))
+            train_log_sigmas.append(log_sigma)
+        return train_mus, train_log_sigmas
 
     def set_up_z_priors(self, N):
         train_mus = nn.ParameterList()
@@ -97,11 +99,15 @@ class BayesianNeuralNetwork(nn.Module):
             train_sigmas.append(sigma)
         return train_mus, train_sigmas
 
+    def logistic(self, x):
+        return 1.0 / (1.0 + torch.exp(-x))
+
     def get_distributions(self, det_model, w_mu, w_sigma):
         out_dists = dict()
         for ((name, _), mu, sigma) in zip(det_model.named_parameters(), \
                    w_mu, w_sigma):
-            out_dists[name] = dists.normal.Normal(mu, sigma) 
+            sigma = self.logistic(sigma)
+            out_dists[name] = dists.normal.Normal(mu, sigma)
         return out_dists
 
     def sample_from_dists(self, w_dists):
@@ -137,25 +143,27 @@ class BayesianNeuralNetwork(nn.Module):
         print("---------------- WEIGHTS -------------------------")
 
     def _zero_out_sigma(self):
-        for (i, sigma) in enumerate(self.w_sigma):
-            self.w_sigma[i] = nn.Parameter(torch.zeros(sigma.shape))
+        for (i, sigma) in enumerate(self.log_w_sigma):
+            self.log_w_sigma[i] = nn.Parameter(-10000 * torch.ones(sigma.shape))
 
     # Run inference.
     def forward(self, X, y, alpha=-10):
-        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+        self.sample_bnn(self.neural_net, self.w_mu, self.log_w_sigma)
         self._print_weights(self.neural_net)
         self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25, \
                 self.neural_net)
 
         all_losses = list()
-        num_epochs = 50
+        all_ans = list()
+        num_epochs = 600
         for i in range(num_epochs):
-            loss, ll = self.loss(self.w_mu, self.w_sigma, self.z_mu, self.z_sigma, \
+            loss, ll = self.loss(self.w_mu, self.log_w_sigma, self.z_mu, self.z_sigma, \
                     self.additive_noise, X, y)
             all_losses.append(loss)
+            all_ans.append(self.additive_noise[0].item())
             self.optimizer.zero_grad()
-            loss.backward() 
-            #print(self.w_sigma[0])
+            loss.backward()
+            #print(self.log_w_sigma[0])
             #for group in self.optimizer.param_groups:
             #    for p in group['params']:
             #        if p.grad is not None:
@@ -163,7 +171,10 @@ class BayesianNeuralNetwork(nn.Module):
             self.optimizer.step()
             if i % 1 == 0:
                 print("[{}] Loss: {}, LL: {}, AN: {}".format(i, loss.item(), "N/A", self.additive_noise[0]))
+        set_trace()
         plt.plot(range(num_epochs), all_losses)
+        plt.show()
+        plt.plot(range(num_epochs), all_ans)
         plt.show()
 
     def predict(self, domain, ground_truth_fn):
@@ -177,20 +188,22 @@ class BayesianNeuralNetwork(nn.Module):
         num_nns = 100
         pred_ys = list()
         #self._zero_out_sigma()
-        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+        self.sample_bnn(self.neural_net, self.w_mu, self.log_w_sigma)
         self._print_weights(self.neural_net)
         self._print_parameters()
         for i in range(num_nns):
-            self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+            self.sample_bnn(self.neural_net, self.w_mu, self.log_w_sigma)
             z = self.sample_z(X)
             disturbed_X = torch.cat([X, z], dim=1).type(torch.Tensor)
             #y = self.neural_net(disturbed_X).squeeze(-1).detach().numpy()
             y = self.neural_net(X).squeeze(-1).detach().numpy()
+            sampled_noise = dists.Normal(0, self.additive_noise).sample()
+            y += sampled_noise
             pred_ys.append(y)
         stacked_ys = np.stack(pred_ys)
         #mean_pred = np.mean(stacked_ys, axis=0)
         self._zero_out_sigma()
-        self.sample_bnn(self.neural_net, self.w_mu, self.w_sigma)
+        self.sample_bnn(self.neural_net, self.w_mu, self.log_w_sigma)
         mean_pred = self.neural_net(X).squeeze(-1).detach().numpy()
         sd = np.std(stacked_ys, axis=0)
         lb = mean_pred - sd
@@ -206,7 +219,7 @@ class BayesianNeuralNetwork(nn.Module):
         plt.show()
 
 def main():
-    N = 10000
+    N = 1000
     (X, y), ground_truth_fn = build_toy_dataset2(N, plot_data=True)
     p = X.shape[1]
     bnn = BayesianNeuralNetwork(N, p)
