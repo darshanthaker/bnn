@@ -50,10 +50,10 @@ class BayesianNeuralNetwork(nn.Module):
         input_size = p # Additional feature for stochastic disturbance.
         self.N = N
         self.neural_net = NeuralNetwork(input_size, model='model1')
-        self.w_var = 1 # TODO(dbthaker): Change this back to 1 at some point.
+        self.w_var = math.log(0.1) # TODO(dbthaker): Change this back to 1 at some point.
         self.z_var = 0 # TODO(dbthaker): Change this back to p at some point.
         noise_lst = nn.ParameterList()
-        self.additive_noise = nn.Parameter(0.85 * torch.ones(1))
+        self.additive_noise = nn.Parameter(torch.ones(1))
         noise_lst.append(self.additive_noise)
 
         self.w_mu, self.log_w_sigma = self.set_up_model_priors(self.neural_net)
@@ -62,17 +62,18 @@ class BayesianNeuralNetwork(nn.Module):
         #        list(self.z_mu) + list(self.z_sigma) + list(noise_lst)
         #self.trainable_params = list(self.w_mu) + list(self.log_w_sigma)
         #self.trainable_params = list(self.w_mu)
-        self.trainable_params = list(self.w_mu) + list(self.log_w_sigma) + list(noise_lst)
+        #self.trainable_params = list(self.w_mu) + list(self.log_w_sigma) + list(noise_lst)
         #self.trainable_params = list(self.log_w_sigma) + list(noise_lst)
-        #self.trainable_params = list(self.w_mu) + list(noise_lst)
+        #self.trainable_params = list(noise_lst)
+        self.trainable_params = list(self.w_mu) + list(noise_lst)
         self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
 
     def set_up_model_priors(self, det_model, use_xavier=False):
         train_mus = nn.ParameterList()
         train_log_sigmas = nn.ParameterList()
-        mus = pickle.load(open('saved_mu.pickle', 'rb'))
-        #for name, param in det_model.named_parameters():
-        for param in mus:
+        #mus = pickle.load(open('saved_mu.pickle', 'rb'))
+        for name, param in det_model.named_parameters():
+        #for param in mus:
             #mu = nn.Parameter(torch.zeros(param.shape))
             #sample_mu = torch.zeros(param.shape)
             #if 'bias' not in name:
@@ -100,7 +101,9 @@ class BayesianNeuralNetwork(nn.Module):
         return train_mus, train_sigmas
 
     def logistic(self, x):
-        return 1.0 / (1.0 + torch.exp(-x))
+        #return x
+        return torch.exp(x)
+        #return 1.0 / (1.0 + torch.exp(-x))
 
     def get_distributions(self, det_model, w_mu, w_sigma):
         out_dists = dict()
@@ -145,12 +148,14 @@ class BayesianNeuralNetwork(nn.Module):
     def _zero_out_sigma(self):
         for (i, sigma) in enumerate(self.log_w_sigma):
             self.log_w_sigma[i] = nn.Parameter(-10000 * torch.ones(sigma.shape))
+            #self.log_w_sigma[i] = nn.Parameter(torch.zeros(sigma.shape))
 
     # Run inference.
-    def forward(self, X, y, alpha=-10):
+    def forward(self, X, y, alpha=1):
         self.sample_bnn(self.neural_net, self.w_mu, self.log_w_sigma)
         self._print_weights(self.neural_net)
-        self.loss = AlphaDivergenceLoss(alpha, self.w_var, self.z_var, self.N, 25, \
+        # TODO(dbthaker): change second 1 to p.
+        self.loss = AlphaDivergenceLoss(alpha, 1, 1, self.N, 50, \
                 self.neural_net)
 
         all_losses = list()
@@ -171,7 +176,7 @@ class BayesianNeuralNetwork(nn.Module):
             self.optimizer.step()
             if i % 1 == 0:
                 print("[{}] Loss: {}, LL: {}, AN: {}".format(i, loss.item(), "N/A", self.additive_noise[0]))
-        set_trace()
+        #set_trace()
         plt.plot(range(num_epochs), all_losses)
         plt.show()
         plt.plot(range(num_epochs), all_ans)

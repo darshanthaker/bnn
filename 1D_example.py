@@ -37,7 +37,7 @@ class BayesianRegression(nn.Module):
         super(BayesianRegression, self).__init__()
         input_size = p
         self.N = N
-        self.w_var = 0.1 # TODO(dbthaker): Change this back to 1 at some point.
+        self.w_var = 1 # TODO(dbthaker): Change this back to 1 at some point.
         self.z_var = 0 # Irrelevant
         self.z_mu = [torch.zeros(N)] # Irrelevant.
         self.z_sigma = [torch.zeros(N)] # Irrelevant.
@@ -47,16 +47,12 @@ class BayesianRegression(nn.Module):
 
         self.w_mu = [torch.zeros((1, 1))]
         self.w_sigma = nn.ParameterList()
-        w_sigma = nn.Parameter(torch.ones(1, 1))
+        w_sigma = nn.Parameter(math.log(0.1) * torch.ones(1, 1))
         self.w_sigma.append(w_sigma)
 
         self.trainable_params = list(self.w_sigma) + list(noise_lst)
         #self.trainable_params = list(self.w_sigma)
         self.optimizer = torch.optim.Adam(self.trainable_params, lr=1e-2)
-
-    def _zero_out_sigma(self):
-        for (i, sigma) in enumerate(self.w_sigma):
-            self.w_sigma[i] = nn.Parameter(torch.zeros(sigma.shape))
 
     # Run inference.
     def forward(self, X, y, alpha=1):
@@ -94,7 +90,7 @@ class BayesianRegression(nn.Module):
         pred_ys = list()
         #self._zero_out_sigma()
         for i in range(num_nns):
-            w = dists.Normal(self.w_mu[0], self.w_sigma[0]).sample()
+            w = dists.Normal(self.w_mu[0], torch.exp(self.w_sigma[0])).sample()
             sampled_noise = dists.Normal(0, self.additive_noise).sample()
             y = F.linear(X, w) + sampled_noise
             pred_ys.append(y)

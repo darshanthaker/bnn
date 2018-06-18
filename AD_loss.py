@@ -26,13 +26,15 @@ class AlphaDivergenceLoss(nn.Module):
         self.f_nn = FNeuralNetwork(use_biases=use_biases)
 
     def logistic(self, x):
-        return 1.0 / (1.0 + torch.exp(-x))
+        #return x
+        return torch.exp(x)
+        #return 1.0 / (1.0 + torch.exp(-x))
 
     def set_up_distributions(self, mus, log_sigmas):
         out_dists = list()
         for (mu, log_sigma) in zip(mus, log_sigmas):
             sigma = self.logistic(log_sigma)
-            out_dists.append(dists.normal.Normal(mu, log_sigma))
+            out_dists.append(dists.normal.Normal(mu, sigma))
         return out_dists
 
     def sample_from_dists(self, inp_dists):
@@ -70,6 +72,7 @@ class AlphaDivergenceLoss(nn.Module):
     def negative_log_normalizer(self, w_mu, log_w_sigma, z_mu, z_sigma):
         w_sigma = self.logistic(log_w_sigma)
         log_two_pi = torch.log(torch.tensor(2 * math.pi).type(torch.Tensor))
+        #w_normalizer = 0.5 * torch.log(2 * math.pi * w_sigma) + \
         w_normalizer = 0.5 * (log_two_pi + log_w_sigma) + \
                     torch.div(w_mu * w_mu, w_sigma)
         if torch.isnan(w_normalizer).any():
@@ -97,14 +100,13 @@ class AlphaDivergenceLoss(nn.Module):
         Output:
             out   : (1, K) - vector of f(W) for each sampled W ~ q.
     """
-    def calc_log_f_w(self, W, mu, log_sigma):
+    def calc_log_f_w(self, W, mu, sigma):
         K = W.shape[0]
         P = W.shape[1]
         assert mu.shape[1] == P
-        assert log_sigma.shape[1] == P
+        assert sigma.shape[1] == P
         # Convert mu and sigma to tiled (K, P) matrices for easier computations.
         mu = torch.cat([mu for i in range(K)], dim=0)
-        sigma = self.logistic(log_sigma)
         sigma = torch.cat([sigma for i in range(K)], dim=0)
     
         out = torch.mul(torch.div(sigma - self.lam, self.lam * sigma), W * W) + \
@@ -189,6 +191,7 @@ class AlphaDivergenceLoss(nn.Module):
         batch_size = true_labs.shape[0]
         weight_dists = self.set_up_distributions(w_mu, log_w_sigma)
         w_sigma = [self.logistic(x) for x in log_w_sigma]
+        #set_trace()
         #z_dists = self.set_up_distributions(z_mu, z_sigma)
         flat_w_mu = self.flatten(w_mu)
         flat_w_sigma = self.flatten(w_sigma)
@@ -196,6 +199,7 @@ class AlphaDivergenceLoss(nn.Module):
         flat_z_mu = self.flatten(z_mu)
         flat_z_sigma = self.flatten(z_sigma)
 
+        # For debugging purposes only.
         self.w_mu = w_mu
         self.w_sigma = w_sigma
 
@@ -212,7 +216,7 @@ class AlphaDivergenceLoss(nn.Module):
         #f_w = torch.ones((1, self.K))
         f_z = torch.ones((1, batch_size))
         lad = self.calc_local_alpha_divs(f_w, f_z, ll)
-        nln = self.negative_log_normalizer(flat_w_mu, flat_w_sigma, \
+        nln = self.negative_log_normalizer(flat_w_mu, flat_log_w_sigma, \
                 flat_z_mu, flat_z_sigma)
         print("LN: {}".format(-nln.item()))
         #lz = flat_w_mu.shape[1] * 0.5 * np.log(2 * math.pi * self.lam)
