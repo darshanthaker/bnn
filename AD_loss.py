@@ -74,13 +74,13 @@ class AlphaDivergenceLoss(nn.Module):
         log_two_pi = torch.log(torch.tensor(2 * math.pi).type(torch.Tensor))
         #w_normalizer = 0.5 * torch.log(2 * math.pi * w_sigma) + \
         w_normalizer = 0.5 * (log_two_pi + log_w_sigma) + \
-                    torch.div(w_mu * w_mu, w_sigma)
+                    0.5 * torch.div(w_mu * w_mu, w_sigma)
         if torch.isnan(w_normalizer).any():
             print("Elements of w_normalizer are NAN!")
             set_trace()
         w_normalizer = torch.sum(w_normalizer, dim=1)
         z_normalizer = 0.5 * torch.log(2 * math.pi * z_sigma) + \
-                    torch.div(z_mu * z_mu, z_sigma)
+                    0.5 * torch.div(z_mu * z_mu, z_sigma)
         z_normalizer = torch.sum(z_normalizer, dim=1)
         #return -w_normalizer - z_normalizer
         return -w_normalizer
@@ -108,9 +108,16 @@ class AlphaDivergenceLoss(nn.Module):
         # Convert mu and sigma to tiled (K, P) matrices for easier computations.
         mu = torch.cat([mu for i in range(K)], dim=0)
         sigma = torch.cat([sigma for i in range(K)], dim=0)
-    
-        out = torch.mul(torch.div(sigma - self.lam, self.lam * sigma), W * W) + \
-                    torch.mul(torch.div(mu, sigma), W)
+
+        v_W = 1.0 / (1.0 / sigma - 1.0 / self.lam)
+        #v_W = (self.lam - sigma) / (self.lam * sigma)
+        m_W = mu
+        #m_W = mu / sigma * v_W
+        #m_W = 1.0 / self.N * mu / sigma * v_W
+        out = -0.5 * 1.0 / v_W * W * W + m_W / v_W * W
+
+        #out = torch.mul(0.5 * torch.div(sigma - self.lam, self.lam * sigma), W * W) + \
+        #            torch.mul(torch.div(mu, sigma), W)
         out /= self.N
         out = torch.sum(out, dim=1).reshape((1, K))
         return out
@@ -149,10 +156,11 @@ class AlphaDivergenceLoss(nn.Module):
         return out
 
     def normal_log_prob(self, mu, sigma, val):
-        var = sigma ** 2
+        #var = sigma ** 2
+        var = sigma
         log_scale = math.log(sigma) if isinstance(sigma, Number) else sigma.log()
-        return -((val - mu) ** 2) / (2 * var) - log_scale - \
-            math.log(math.sqrt(2 * math.pi)) 
+        return -((val - mu) ** 2) / (2 * var) - \
+            0.5 * math.log(math.sqrt(2 * math.pi * var)) 
 
     def calc_local_alpha_divs(self, f_w, f_z, ll):
         # Calculate product of each f(W)*f_i(z_i) for all z_i and W ~ q.
@@ -166,15 +174,15 @@ class AlphaDivergenceLoss(nn.Module):
         return out
 
     def calc_log_likelihood(self, X, Z, ws, y, an):
-        lls = torch.zeros((len(ws), 1))
+        lls = torch.zeros((len(ws), X.shape[0]))
         for (i, w) in enumerate(ws):
             Zt = Z.transpose(0, 1)
             #disturbed_X = torch.cat([X, Zt], dim=1)
             #prediction = self.f_nn(disturbed_X, w)
             prediction = self.f_nn(X, w)
             probs = self.normal_log_prob(prediction, an, y)
-            log_likelihood = torch.sum(probs, dim=0)
-            lls[i] = log_likelihood
+            #log_likelihood = torch.sum(probs, dim=0)
+            lls[i, :] = probs.transpose(0, 1)
         #mean_lls = torch.sum(lls, dim=0) / len(ws)
         return lls
 
@@ -191,7 +199,6 @@ class AlphaDivergenceLoss(nn.Module):
         batch_size = true_labs.shape[0]
         weight_dists = self.set_up_distributions(w_mu, log_w_sigma)
         w_sigma = [self.logistic(x) for x in log_w_sigma]
-        #set_trace()
         #z_dists = self.set_up_distributions(z_mu, z_sigma)
         flat_w_mu = self.flatten(w_mu)
         flat_w_sigma = self.flatten(w_sigma)
@@ -219,6 +226,7 @@ class AlphaDivergenceLoss(nn.Module):
         nln = self.negative_log_normalizer(flat_w_mu, flat_log_w_sigma, \
                 flat_z_mu, flat_z_sigma)
         print("LN: {}".format(-nln.item()))
+        print("LAD: {}".format(lad.item()))
         #lz = flat_w_mu.shape[1] * 0.5 * np.log(2 * math.pi * self.lam)
         #print("LZ: {}".format(lz))
         #set_trace()
